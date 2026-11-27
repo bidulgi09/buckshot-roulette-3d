@@ -6,6 +6,7 @@
   <title>BUCKSHOT ROULETTE 3D // 벅샷 룰렛</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="./relay-config.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=IBM+Plex+Mono:wght@400;600;700&family=Noto+Sans+KR:wght@400;700;900&display=swap" rel="stylesheet">
@@ -584,7 +585,10 @@
     /* -----------------------------------------------------------
        1. CSP-SAFE MULTIPLAYER ENGINE (HTTPS RELAY + LOCAL SYNC, NO WEBSOCKETS)
     ----------------------------------------------------------- */
-    const RELAY_BASE = 'https://ntfy.sh';
+    const CONFIGURED_RELAY_BASE = typeof window.BS3D_RELAY_BASE === 'string'
+      ? window.BS3D_RELAY_BASE.trim()
+      : '';
+    const RELAY_BASE = (CONFIGURED_RELAY_BASE || 'https://ntfy.sh').replace(/\/+$/, '');
     const LOBBY_TOPIC = 'buckshot3d-global-v4-lobby';
     const ROOM_TTL_MS = 90000;
 
@@ -742,13 +746,17 @@
       if (!badge) return;
       badge.textContent = relayAvailable
         ? 'ONLINE: GLOBAL SYNC ●'
-        : 'OFFLINE: LOCAL TABS ONLY';
+        : CONFIGURED_RELAY_BASE
+          ? 'OFFLINE: LOCAL TABS ONLY'
+          : 'OFFLINE: RELAY NOT CONFIGURED';
       badge.className = relayAvailable
         ? 'text-emerald-400 font-bold'
         : 'text-red-400 font-bold';
       badge.title = relayAvailable
         ? '다른 네트워크에서도 방 목록과 참가 요청이 동기화됩니다.'
-        : '인터넷 릴레이에 연결할 수 없습니다. 같은 브라우저 탭에서만 동기화됩니다.';
+        : CONFIGURED_RELAY_BASE
+          ? '인터넷 릴레이에 연결할 수 없습니다. 같은 브라우저 탭에서만 동기화됩니다.'
+          : 'relay-config.js에 배포한 Cloudflare Worker 주소를 설정해야 온라인 대전이 가능합니다.';
     }
 
     function setRelayUnavailable() {
