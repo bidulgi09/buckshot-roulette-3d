@@ -2,28 +2,26 @@
 
 3D Buckshot Roulette game hosted on GitHub Pages.
 
-## Enable cross-device online rooms
+## Set up free cross-device rooms with Supabase
 
-GitHub Pages is static hosting, so cross-device rooms need a reachable relay. The
-included Cloudflare Worker uses Durable Objects for short-lived message storage.
-The Cloudflare Workers free plan is sufficient for small private games.
+1. Create a free project at [supabase.com](https://supabase.com/).
+2. Open **SQL Editor → New query**, paste the contents of `supabase.sql`, and run it.
+3. In **Project Settings → API**, copy the **Project URL** and the **anon/public key**.
+   Never use or share the `service_role` key.
+4. Open `relay-config.js` on the repository's `gh-page` branch in GitHub and select
+   **Edit**. Fill in the two values below, then commit. You can also send these
+   two public values to the maintainer to have them configured:
 
-1. Create a free Cloudflare account and an API token with **Workers Scripts: Edit**
-   permission. Find the Account ID on the Cloudflare dashboard overview.
-2. In GitHub, open **Settings → Secrets and variables → Actions** and add
-   `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repository secrets.
-3. Open **Actions → Deploy online relay → Run workflow**. The workflow output shows
-   the deployed `workers.dev` URL.
-4. Copy that URL into `relay-config.js`:
-   `window.BS3D_RELAY_BASE = 'https://your-worker.your-account.workers.dev';`
-5. Commit and push that setting to `gh-page`. GitHub Pages will redeploy the game.
+   ```js
+   window.BS3D_SUPABASE_URL = 'https://your-project.supabase.co';
+   window.BS3D_SUPABASE_ANON_KEY = 'your-anon-public-key';
+   ```
 
-If you can use a terminal instead, the same relay can be deployed with
-`npx wrangler login` followed by `npx wrangler deploy` from the repository root.
+5. Commit the change. GitHub Pages will redeploy automatically; reload the game.
+   The menu should show `ONLINE: GLOBAL SYNC`.
 
-When the relay is configured and reachable, the menu shows `ONLINE: GLOBAL SYNC`.
-Otherwise it reports `OFFLINE: LOCAL TABS ONLY`; local browser-tab sync is not
-cross-device multiplayer.
-
-The relay is public and does not provide account authentication. Do not use
-sensitive passwords or personal information in game rooms.
+The database policies intentionally allow unauthenticated game clients to read and
+publish lobby packets. The anon/publishable key is intended for browser use; never
+use or share the `service_role` or secret key. Room passwords and game state are
+visible to clients, so do not reuse a real password or put sensitive information
+in a room.

@@ -1,1 +1,2 @@
-window.BS3D_RELAY_BASE = '';
+window.BS3D_SUPABASE_URL = '';
+window.BS3D_SUPABASE_ANON_KEY = '';
