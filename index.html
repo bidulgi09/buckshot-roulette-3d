@@ -600,6 +600,8 @@
       currentUserId = 'u_' + Math.random().toString(36).slice(2, 8) + '_' + Date.now().toString(36).slice(-4);
       sessionStorage.setItem('bs3d_uid', currentUserId);
     }
+    const tabInstanceId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    const tabStartedAt = Date.now();
 
     let relayAvailable = false;
     let lobbyPollTimer = null;
@@ -608,12 +610,34 @@
     let currentRoomId = null;
     let hostedRoomState = null;
     let pendingJoinRoom = null;
+    let pendingJoinAction = null;
+    let joinRetryTimer = null;
+    let relayProbeInFlight = false;
     const roomsMap = new Map();
     const seenPacketIds = new Set();
     let cachedRooms = [];
 
     const localChannel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('buckshot_rooms_v4') : null;
     const STORAGE_ROOMS_KEY = 'buckshot3d_rooms_store_v4';
+
+    function handleTabIdentityClaim(packet) {
+      if (packet.uid !== currentUserId || packet.instanceId === tabInstanceId) return;
+
+      const thisIdentity = `${tabStartedAt}:${tabInstanceId}`;
+      const otherIdentity = `${packet.startedAt}:${packet.instanceId}`;
+      if (otherIdentity > thisIdentity) {
+        localChannel.postMessage({
+          kind: 'TAB_ID_CLAIM',
+          uid: currentUserId,
+          instanceId: tabInstanceId,
+          startedAt: tabStartedAt
+        });
+        return;
+      }
+
+      currentUserId = 'u_' + Math.random().toString(36).slice(2, 8) + '_' + Date.now().toString(36).slice(-4);
+      sessionStorage.setItem('bs3d_uid', currentUserId);
+    }
 
     function loadRoomsFromLocalStorage() {
       try {
@@ -650,31 +674,36 @@
 
     async function publishRelayPacket(topic, packet) {
       if (!relayAvailable) return false;
+      const controller = new AbortController();
+      const tid = setTimeout(() => controller.abort(), 3500);
       try {
-        const controller = new AbortController();
-        const tid = setTimeout(() => controller.abort(), 3500);
         const res = await fetch(`${RELAY_BASE}/${topic}`, {
           method: 'POST',
           body: JSON.stringify({ ...packet, pktId: packet.pktId || `${currentUserId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` }),
           signal: controller.signal
         });
-        clearTimeout(tid);
+        if (!res.ok) setRelayUnavailable();
         return res.ok;
       } catch (e) {
+        setRelayUnavailable();
         return false;
+      } finally {
+        clearTimeout(tid);
       }
     }
 
     async function pollRelayTopic(topic, sinceWindow = '35s') {
       if (!relayAvailable) return;
+      const controller = new AbortController();
+      const tid = setTimeout(() => controller.abort(), 3500);
       try {
-        const controller = new AbortController();
-        const tid = setTimeout(() => controller.abort(), 3500);
         const res = await fetch(`${RELAY_BASE}/${topic}/json?poll=1&since=${sinceWindow}`, {
           signal: controller.signal
         });
-        clearTimeout(tid);
-        if (!res.ok) return;
+        if (!res.ok) {
+          setRelayUnavailable();
+          return;
+        }
 
         const text = await res.text();
         if (!text) return;
@@ -701,7 +730,57 @@
 
           handleIncomingPacket(packet);
         }
-      } catch (e) {}
+      } catch (e) {
+        setRelayUnavailable();
+      } finally {
+        clearTimeout(tid);
+      }
+    }
+
+    function updateRelayBadge() {
+      const badge = document.getElementById('online-status-badge');
+      if (!badge) return;
+      badge.textContent = relayAvailable
+        ? 'ONLINE: GLOBAL SYNC ●'
+        : 'OFFLINE: LOCAL TABS ONLY';
+      badge.className = relayAvailable
+        ? 'text-emerald-400 font-bold'
+        : 'text-red-400 font-bold';
+      badge.title = relayAvailable
+        ? '다른 네트워크에서도 방 목록과 참가 요청이 동기화됩니다.'
+        : '인터넷 릴레이에 연결할 수 없습니다. 같은 브라우저 탭에서만 동기화됩니다.';
+    }
+
+    function setRelayUnavailable() {
+      if (!relayAvailable) return;
+      relayAvailable = false;
+      updateRelayBadge();
+    }
+
+    async function checkRelayConnection() {
+      if (relayProbeInFlight) return;
+      relayProbeInFlight = true;
+      const wasAvailable = relayAvailable;
+      const controller = new AbortController();
+      const tid = setTimeout(() => controller.abort(), 3500);
+
+      try {
+        const probe = await fetch(`${RELAY_BASE}/${LOBBY_TOPIC}/json?poll=1&since=5s`, {
+          signal: controller.signal
+        });
+        relayAvailable = probe.ok;
+      } catch (e) {
+        relayAvailable = false;
+      } finally {
+        clearTimeout(tid);
+        relayProbeInFlight = false;
+      }
+
+      updateRelayBadge();
+      if (relayAvailable && !wasAvailable) {
+        await pollRelayTopic(LOBBY_TOPIC, '60s');
+        if (currentRoomId) startRoomPolling(currentRoomId);
+      }
     }
 
     function handleIncomingPacket(packet) {
@@ -735,8 +814,18 @@
 
       if (localChannel) {
         localChannel.onmessage = (ev) => {
-          if (ev.data) handleIncomingPacket(ev.data);
+          if (ev.data?.kind === 'TAB_ID_CLAIM') {
+            handleTabIdentityClaim(ev.data);
+          } else if (ev.data) {
+            handleIncomingPacket(ev.data);
+          }
         };
+        localChannel.postMessage({
+          kind: 'TAB_ID_CLAIM',
+          uid: currentUserId,
+          instanceId: tabInstanceId,
+          startedAt: tabStartedAt
+        });
       }
 
       window.addEventListener('storage', (ev) => {
@@ -786,29 +875,14 @@
         }
       }, 10000);
 
-      // Probe HTTPS relay without using WebSockets (safe inside Canvas sandbox)
-      try {
-        const controller = new AbortController();
-        const tid = setTimeout(() => controller.abort(), 3000);
-        const probe = await fetch(`${RELAY_BASE}/${LOBBY_TOPIC}/json?poll=1&since=5s`, {
-          signal: controller.signal
-        });
-        clearTimeout(tid);
-        relayAvailable = probe.ok;
-      } catch (e) {
-        relayAvailable = false;
-      }
+      await checkRelayConnection();
+      lobbyPollTimer = setInterval(() => {
+        if (!currentRoomId && relayAvailable) pollRelayTopic(LOBBY_TOPIC, '30s');
+      }, 2500);
+      setInterval(checkRelayConnection, 10000);
 
       if (relayAvailable) {
-        badge.textContent = 'ONLINE: GLOBAL SYNC ●';
-        badge.className = 'text-emerald-400 font-bold';
         await pollRelayTopic(LOBBY_TOPIC, '60s');
-        lobbyPollTimer = setInterval(() => {
-          if (!currentRoomId) pollRelayTopic(LOBBY_TOPIC, '30s');
-        }, 2500);
-      } else {
-        badge.textContent = 'ONLINE: LOCAL TAB SYNC ●';
-        badge.className = 'text-emerald-400 font-bold';
       }
     }
 
@@ -846,6 +920,18 @@
       saveRoomToLocalStorage(room);
       cachedRooms = Array.from(roomsMap.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
       renderRoomsList();
+
+      if (pendingJoinAction && pendingJoinAction.roomId === room.id) {
+        const joined = [...(room.players || []), ...(room.spectators || [])]
+          .some((participant) => participant.uid === currentUserId);
+        if (joined) {
+          clearInterval(joinRetryTimer);
+          joinRetryTimer = null;
+          pendingJoinAction = null;
+          document.getElementById('guest-wait-msg').textContent =
+            '방장이 입장을 확인했습니다. 게임 시작을 기다려 주세요...';
+        }
+      }
 
       if (currentRoomId === room.id) {
         if (room.hostId === currentUserId) {
@@ -969,6 +1055,20 @@
       if (localChannel) localChannel.postMessage(packet);
     }
 
+    function retryPendingJoin() {
+      if (!pendingJoinAction) return;
+      if (pendingJoinAction.attempts >= 8) {
+        clearInterval(joinRetryTimer);
+        joinRetryTimer = null;
+        pendingJoinAction = null;
+        document.getElementById('guest-wait-msg').textContent =
+          '입장 응답이 없습니다. 네트워크 연결을 확인한 뒤 다시 입장해 주세요.';
+        return;
+      }
+      pendingJoinAction.attempts += 1;
+      dispatchRoomAction(pendingJoinAction.roomId, pendingJoinAction.action);
+    }
+
     window.createOnlineRoom = function () {
       sfx.init();
       sfx.playClick(600);
@@ -1041,6 +1141,17 @@
       const nickname = (document.getElementById('nickname-input').value || 'GUEST').trim().toUpperCase();
       currentRoomId = roomId;
       startRoomPolling(roomId);
+      pendingJoinAction = {
+        roomId,
+        attempts: 0,
+        action: {
+          type: 'JOIN',
+          uid: currentUserId,
+          name: nickname,
+          password: pw,
+          ts: Date.now()
+        }
+      };
 
       const optimisticRoom = JSON.parse(JSON.stringify(targetRoom));
       const alreadyIn = (optimisticRoom.players || []).some(p => p.uid === currentUserId) ||
@@ -1053,14 +1164,9 @@
         }
       }
       handleOnlineRoomSync(optimisticRoom);
-
-      dispatchRoomAction(roomId, {
-        type: 'JOIN',
-        uid: currentUserId,
-        name: nickname,
-        password: pw,
-        ts: Date.now()
-      });
+      document.getElementById('guest-wait-msg').textContent = '방장에게 입장 요청을 보내는 중...';
+      retryPendingJoin();
+      if (pendingJoinAction) joinRetryTimer = setInterval(retryPendingJoin, 2500);
     };
 
     function handleOnlineRoomSync(room) {
@@ -1195,6 +1301,9 @@
 
     window.leaveOnlineRoom = function () {
       sfx.playClick(460);
+      clearInterval(joinRetryTimer);
+      joinRetryTimer = null;
+      pendingJoinAction = null;
       const roomId = currentRoomId;
       if (roomId) {
         if (hostedRoomState && hostedRoomState.id === roomId && hostedRoomState.hostId === currentUserId) {
